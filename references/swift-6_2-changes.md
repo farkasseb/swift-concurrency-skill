@@ -58,16 +58,24 @@ nonisolated(nonsending) func lightWork() async { ... } // stays on caller's acto
 
 ### Task Isolation Inheritance
 
-**Unstructured tasks in nonisolated functions NEVER inherit actor isolation** — this is consistent across sync, nonsending async, and @concurrent async:
+**Critical rule**: `Task { }` only inherits *static* isolation, not the *dynamic* isolation a function was given by its caller.
+
+- **Inside `@MainActor func ...`**: the Task inherits `@MainActor`. The body runs on main.
+- **Inside ANY nonisolated function** (synchronous, `nonisolated(nonsending)` async, OR `@concurrent` async): the Task does NOT inherit caller's actor isolation. Even though `nonisolated(nonsending)` makes the function itself run on the caller's actor at runtime, the unstructured Task is a fresh nonisolated context with no actor.
 
 ```swift
+class NotSendable { var value = 0 }
+
 nonisolated(nonsending) func createTask(ns: NotSendable) async {
+    // `createTask` body runs on the caller's actor (e.g. MainActor)
     Task {
-        // Does NOT run on caller's actor
-        ns.value += 1 // error: concurrent access
+        // But this Task does NOT — it runs nonisolated.
+        ns.value += 1   // error: capturing non-Sendable `ns` across isolation boundary
     }
 }
 ```
+
+This is intentional and consistent with synchronous nonisolated functions. To capture the caller's actor in the Task, the function must take an explicit `isolated` parameter and the Task must capture it.
 
 ### #isolation Behavior
 
@@ -162,12 +170,22 @@ When enabled, conformances of `@MainActor` types are inferred `@MainActor` UNLES
 - Protocol inherits `SendableMetatype` (or `Sendable`) → inferred `nonisolated`
 - All requirement-satisfying declarations are `nonisolated` → inferred `nonisolated`
 
-### Protocol Conformance Solutions (ranked)
+### Protocol Conformance Solutions (ranked for `@MainActor` class with isolation mismatch)
 
-1. **nonisolated type** (Non-Sendable First Design) — no mismatch at all
-2. **Isolated conformance** (`@MainActor Equatable`) — explicit, type-safe
-3. **`@preconcurrency` conformance** — works everywhere, less type-safe
-4. **`nonisolated` + `assumeIsolated`** — verbose, crashes if wrong
+For the canonical case `@MainActor class Foo: Equatable { static func == (...) }`:
+
+1. **`nonisolated` on the witness** — most common, works when the body only reads `let` / Sendable state. Keep `@MainActor` on the class; mark `static func ==` as `nonisolated`. This is the right answer for typical model types where `==` compares immutable fields.
+   ```swift
+   @MainActor final class Foo: Equatable {
+       let name: String
+       nonisolated static func == (l: Foo, r: Foo) -> Bool { l.name == r.name }
+   }
+   ```
+2. **Isolated conformance `@MainActor Equatable`** — when the witness MUST access MainActor-isolated state. Trade-off: an isolated conformance cannot satisfy a `Sendable` or `SendableMetatype` requirement, so the type can't cross those boundaries via this conformance.
+3. **`InferIsolatedConformances` upcoming feature** — module-wide; conformances of `@MainActor` types are automatically `@MainActor`. Right tool when option 2 is correct everywhere in the module.
+4. **Drop `@MainActor` from the type** (Non-Sendable First Design) — works only if the type doesn't actually need MainActor isolation. Don't use this as a "fix" if the type genuinely belongs on MainActor.
+5. **`@preconcurrency` conformance** — transitional escape hatch for moving code, less type-safe.
+6. **`nonisolated` + `assumeIsolated`** — verbose, crashes if the runtime assumption is wrong.
 
 ---
 

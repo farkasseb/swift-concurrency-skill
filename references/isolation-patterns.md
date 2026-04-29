@@ -214,6 +214,15 @@ class NotSendable {}
 @MainActor class Sub: NotSendable {}  // Sub is NOT implicitly Sendable
 ```
 
+**Critical**: per SE-0434, `class Sub: NotSendable, Sendable {}` is **rejected by the compiler** — explicitly adding the conformance is an error here. The two ways forward:
+
+1. **Drop the non-Sendable parent** if you don't need Objective-C interop / it's a vestigial `: NSObject`. Then `@MainActor` makes the subclass implicitly Sendable.
+2. **`@unchecked Sendable`** — opt out of compiler verification and take responsibility:
+   ```swift
+   @MainActor final class Sub: NotSendable, @unchecked Sendable { }
+   ```
+   Safe only if all of the subclass's stored properties (and whatever the parent exposes) are immutable or are protected by a real lock.
+
 ### Non-Sendable + async = Red Flag
 ```swift
 class Foo {
@@ -610,57 +619,58 @@ The `GlobalConcurrency` setting (part of Swift 6 mode) enforces concurrency safe
 ```
 // "Static property 'shared' is not concurrency-safe because..."
 // "Reference to static property 'default' is not concurrency-safe..."
+// "Var 'sharedConfig' is not concurrency-safe because it is non-isolated global shared mutable state"
 ```
 
-### Solutions by case
+### Solutions ranked best to worst
 
-**Immutable constant (safe — just annotate):**
+Apply in order — `nonisolated(unsafe)` is the LAST option, not the first.
+
+**1. `let` constant of `Sendable` type** — eliminates the warning at the language level.
 ```swift
-// Before: warning
-static let shared = MyService()
-
-// Fix: mark nonisolated if truly thread-safe
-nonisolated(unsafe) static let shared = MyService()
-// OR: isolate to MainActor
-@MainActor static let shared = MyService()
+public let sharedConfig = Config.default          // best: immutable, Sendable, no warning
+enum Constants {
+    static let apiURL = URL(string: "...")!       // safe by definition
+}
 ```
 
-**Mutable static variable:**
+**2. `@MainActor`** — when access is UI-driven or main-thread-only. Compiler-verified.
 ```swift
-// Before: warning
-static var configuration = Config()
+@MainActor public var sharedConfig = Config.default
+@MainActor class UserManager {
+    static let shared = UserManager()
+}
+```
 
-// Fix 1: MainActor (if UI-related)
-@MainActor static var configuration = Config()
+**3. `actor` wrapper** — when mutation comes from multiple isolation domains and async access is acceptable.
+```swift
+actor ConfigStore {
+    static let shared = ConfigStore()
+    var config = Config.default
+}
+```
 
-// Fix 2: Mutex (if needs thread-safe access, iOS 18+)
+**4. `Mutex` (iOS 18+) or `OSAllocatedUnfairLock` (iOS 16+)** — when you need synchronous thread-safe access.
+```swift
+// iOS 18+ — compiler-verified Sendable
 static let configuration = Mutex(Config())
 
-// Fix 3: Make it a let with Mutex for internal mutation
+// iOS 16+ — pre-Mutex era, requires @unchecked Sendable on the containing type
+final class Holder: @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock(initialState: Config.default)
+    var value: Config {
+        get { lock.withLock { $0 } }
+        set { lock.withLock { $0 = newValue } }
+    }
+}
 ```
 
-**Singleton pattern:**
+**5. `nonisolated(unsafe)`** — LAST RESORT. Compiler does NO checking. Use only when an external invariant guarantees safety (e.g., set once at app launch before any concurrency, never mutated again).
 ```swift
-// Best for most app singletons:
-@MainActor
-class UserManager {
-    static let shared = UserManager()
-    private init() {}
-}
-
-// For already thread-safe singletons (internal locking):
-class Cache: @unchecked Sendable {
-    static let shared = Cache()
-}
+nonisolated(unsafe) public var sharedConfig = Config.default
 ```
 
-**Enum-based constants (safe by definition):**
-```swift
-enum Constants {
-    static let apiURL = URL(string: "https://api.example.com")!  // Sendable, immutable — safe
-}
-```
+### Anti-patterns
 
-### Key principle
-
-`nonisolated(unsafe)` is a targeted opt-out for ONE declaration. Prefer `@MainActor` for singletons. Use `@unchecked Sendable` only when you have internal locking. Audit each global/static individually.
+- **Don't** start with `nonisolated(unsafe)`. It is the escape hatch, not the default. Audit each one — most globals can move to `let`, `@MainActor`, or an `actor`.
+- **Don't** "fix" a global-mutable-state warning by adding `@unchecked Sendable` to the *type*. The warning is about the variable, not the type's Sendable status.
