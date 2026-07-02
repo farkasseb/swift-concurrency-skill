@@ -16,7 +16,7 @@
 ## SE-0461: Run nonisolated async functions on the caller's actor by default {#se-0461}
 
 **Upcoming feature flag**: `NonisolatedNonsendingByDefault`
-**Status**: Implemented in Swift 6.2
+**Status**: Implemented in Swift 6.2. Still opt-in as of Swift 6.4 (verified via `hasFeature` probe) — checking project settings remains mandatory.
 
 ### The Behavior Change
 
@@ -164,6 +164,8 @@ Setting MainActor default **implicitly enables `InferIsolatedConformances`**.
 
 `as?` / `is` checks executor at runtime for isolated conformances. Cast **fails** if not running on the conformance's actor. Cast involving `Sendable` or `SendableMetatype` never accepts isolated conformance.
 
+**Older-runtime caveat (per SE-0470)**: runtimes that predate isolated conformances don't perform the executor check — the cast **incorrectly succeeds** even outside the conformance's isolation domain, which can permit data races. The compile-time rules still apply everywhere; only the dynamic-cast enforcement is newer-runtime-only. Don't rely on a failing `as?` as a safety mechanism if you deploy to older OS versions.
+
 ### InferIsolatedConformances Behavior
 
 When enabled, conformances of `@MainActor` types are inferred `@MainActor` UNLESS:
@@ -199,6 +201,39 @@ The runtime behavior is unchanged (ObjC async already ran on caller's actor); on
 
 ---
 
+## Swift 6.2 APIs Gated on iOS 26 / macOS 26 Runtimes
+
+These shipped with the Swift 6.2 *compiler* but need new *runtime* support — the availability gate is the OS version, not the toolchain. Contrast with `@concurrent`/`nonisolated(nonsending)`/default isolation above, which work on any deployment target.
+
+### SE-0472: `Task.immediate` (iOS 26+ / macOS 26+)
+
+Starts the task synchronously on the calling executor and runs until the first suspension point, then continues as a normal task. Removes the "one runloop hop before anything happens" of `Task {}` — useful for gesture handlers where the first part of the work must happen in the current CA transaction.
+
+```swift
+Task.immediate { await viewModel.beginInteraction() }
+```
+
+Also `Task.immediateDetached` and `addImmediateTask` on task groups. All `@available(iOS 26, macOS 26, ...)`.
+
+### SE-0475: `Observations` (iOS 26+ / macOS 26+)
+
+Transactional `AsyncSequence` over `@Observable` state — values are coalesced per transaction, no Combine needed:
+
+```swift
+for await name in Observations({ person.name }) { render(name) }
+```
+
+This is the missing piece for replacing `@Published`/`objectWillChange` pipelines; see the Combine replacement table in [isolation-patterns.md](isolation-patterns.md). Runtime-gated by the Observation framework version.
+
+### SE-0469: Task Naming (split availability)
+
+- `Task(name: "sync-user") { ... }` / `Task.detached(name:)` / `group.addTask(name:)` — the *setter* side back-deploys (emitted into client, iOS 13 floor in the SDK).
+- **Reading** names is runtime-gated: static `Task.name` (current task's name) requires **iOS 26+**; the instance property `task.name` (SE-0469 amendment, Swift 6.4) requires **iOS 27+** (both verified in SDK interfaces).
+
+Names show up in Instruments and debugger task dumps — cheap observability, use them in TaskGroups doing heterogeneous work.
+
+---
+
 ## Compiler Settings Guide {#compiler-settings}
 
 ### Just Turn These On (safe, unlikely to break anything)
@@ -218,7 +253,9 @@ BareSlashRegexLiterals, ConciseMagicFile, DeprecateApplicationMain, ForwardTrail
 
 ### Far Off (ignore for now)
 
-ExistentialAny, InternalImportsByDefault, MemberImportVisibility
+ExistentialAny, InternalImportsByDefault.
+
+MemberImportVisibility is no longer far off: Xcode 27 new-project templates set `SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES`. Not concurrency-related.
 
 ### "Approachable Concurrency" Xcode Setting
 

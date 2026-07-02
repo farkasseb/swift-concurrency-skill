@@ -1,20 +1,26 @@
 ---
 name: swift-concurrency
 description: >
-  Swift 6.2 Approachable Concurrency expert. Corrects wrong answers about
+  Swift 6.2–6.4 Approachable Concurrency expert. Corrects wrong answers about
   nonisolated async isolation (SE-0461), @concurrent, default actor isolation
-  (SE-0466), isolated conformances (SE-0470). TRIGGER: async/await, actors,
-  Sendable, Task, @MainActor, nonisolated, @concurrent, AsyncSequence, Swift 6
-  migration, concurrency warnings ("Sending value of non-Sendable type", "cannot
-  cross actor boundary", protocol conformance isolation mismatch), choosing
-  actor vs Mutex vs @MainActor, NonisolatedNonsendingByDefault, wrong-thread
-  debugging, Combine + @MainActor crashes. Training data predates Swift 6.2 —
-  without this skill, answers about async isolation behavior will be wrong.
+  (SE-0466), isolated conformances (SE-0470), await in defer bodies (SE-0493,
+  Swift 6.4 — telling the user "you can't await in defer" or suggesting
+  defer { Task { } } is WRONG), task cancellation shields (SE-0504), weak let
+  (SE-0481), Task.immediate. TRIGGER: async/await, actors, Sendable, Task,
+  @MainActor, nonisolated, @concurrent, AsyncSequence, Swift 6 migration,
+  concurrency warnings ("Sending value of non-Sendable type", "cannot cross
+  actor boundary", "unstructured throwing task ... is not used"
+  [#NoUseUnstructuredThrowingTask], protocol conformance isolation mismatch),
+  choosing actor vs Mutex vs @MainActor, NonisolatedNonsendingByDefault,
+  wrong-thread debugging, Combine + @MainActor crashes, and any "which
+  iOS version does this concurrency API need" question. Training data
+  predates Swift 6.2–6.4 — without this skill, answers about async isolation
+  behavior and feature availability will be wrong.
 ---
 
-# Swift 6.2 + Approachable Concurrency
+# Swift 6.2–6.4 + Approachable Concurrency
 
-## CRITICAL: Top 5 Things Claude Gets Wrong
+## CRITICAL: Top 7 Things Claude Gets Wrong
 
 ### 1. nonisolated async functions NOW inherit caller's isolation
 
@@ -75,7 +81,26 @@ Task {
 
 Nested `Task { Task { } }` inherits actor context and priority, but NOT cancellation.
 
-### 5. "Approachable Concurrency" ≠ Default Actor Isolation
+### 5. defer CAN await now (Swift 6.4)
+
+```swift
+func process() async throws {
+    let handle = try await acquire()
+    defer { await handle.release() }   // legal in Swift 6.4, ANY deployment target
+    try await use(handle)
+}
+```
+
+- Implicitly awaited at every scope exit; runs to completion before return. Inherits enclosing isolation.
+- Language-only feature — works targeting old iOS versions; only the compiler must be 6.4 (Xcode 27).
+- The pre-6.4 habit `defer { Task { await cleanup() } }` is an **anti-pattern**: cleanup races the function's return and errors vanish. Don't suggest it on Swift 6.4.
+- Details + cancellation caveats: [references/swift-6_3-6_4-changes.md](references/swift-6_3-6_4-changes.md)
+
+### 6. Swift 6.4 warns on unused throwing Tasks (SE-0520)
+
+`Task { try await work() }` now emits `unstructured throwing task ... is not used [#NoUseUnstructuredThrowingTask]`. Fix by handling the error inside, or `let task = ...; try await task.value` — NOT by stripping `try` or silently swallowing. See [references/swift-6_3-6_4-changes.md](references/swift-6_3-6_4-changes.md).
+
+### 7. "Approachable Concurrency" ≠ Default Actor Isolation
 
 These are **independent** settings:
 - **Approachable Concurrency** (Xcode build setting) = in Swift 6 mode, enables two additional flags: `NonisolatedNonsendingByDefault` + `InferIsolatedConformances`. In Swift 5 mode, enables all 5 flags (see [swift-6_2-changes.md](references/swift-6_2-changes.md)).
@@ -88,7 +113,9 @@ These are **independent** settings:
 - **Migrating to Swift 6 or fixing concurrency warnings** → Read [references/migration-guide.md](references/migration-guide.md)
 - **If codebase uses Combine with Swift 6** → You MUST read [references/migration-guide.md](references/migration-guide.md)
 - **Choosing between actor / Mutex / @MainActor / nonisolated** → Read [references/isolation-patterns.md](references/isolation-patterns.md)
-- **Using @concurrent, nonisolated(nonsending), default isolation, isolated conformances** → Read [references/swift-6_2-changes.md](references/swift-6_2-changes.md)
+- **Using @concurrent, nonisolated(nonsending), default isolation, isolated conformances, Task.immediate, Observations, task naming** → Read [references/swift-6_2-changes.md](references/swift-6_2-changes.md)
+- **await in defer, cancellation shields, weak let, ~Sendable, SE-0520 warning, anything Swift 6.3/6.4 or Xcode 26.6/27** → Read [references/swift-6_3-6_4-changes.md](references/swift-6_3-6_4-changes.md)
+- **"What iOS version does this concurrency API need?"** → Feature Availability Matrix in [references/concurrency-glossary.md](references/concurrency-glossary.md)
 - **Enabling Approachable Concurrency in SPM packages** → Read [references/swift-6_2-changes.md](references/swift-6_2-changes.md) (SPM section)
 - **Structured concurrency (async let vs TaskGroup)** → Read [references/isolation-patterns.md](references/isolation-patterns.md) (section 11)
 - **Bridging callback/delegate APIs** → Read [references/isolation-patterns.md](references/isolation-patterns.md) (section 12: Continuations)
@@ -186,6 +213,6 @@ Before answering concurrency questions, CHECK the project's settings:
 - **For Combine replacement**: use `swift-async-algorithms` package — provides `merge`, `combineLatest`, `zip`, `debounce`, `throttle`, `chain`, `removeDuplicates`, `chunks`.
 - **Favor `@concurrent` over `Task.detached`.** Task.detached also detaches priority and task-locals.
 - **Use actors sparingly.** Prefer @MainActor or non-Sendable types. Actors are for: non-Sendable state + atomic mutations + can't be on MainActor.
-- **Always note minimum OS versions**: Mutex requires iOS 18+. Default isolation/`@concurrent` require Swift 6.2 compiler (any deployment target). For iOS 16 deployment: use `OSAllocatedUnfairLock` or `@unchecked Sendable` with `NSLock` instead of Mutex.
+- **Always distinguish language features from runtime features when noting availability.** Language features need only the compiler and work on any deployment target: `@concurrent`, default isolation (Swift 6.2), `weak let` (6.3), `await` in `defer` (6.4). Runtime features need a minimum OS regardless of compiler: `Mutex` (iOS 18+), `Task.immediate`/`Observations`/static `Task.name` (iOS 26+), `withTaskCancellationShield`/move-only `Continuation` (iOS 27+). For iOS 16 deployment: use `OSAllocatedUnfairLock` or `@unchecked Sendable` with `NSLock` instead of Mutex. Full table: glossary Feature Availability Matrix.
 - **Check NonisolatedNonsendingByDefault before answering** any question about where async code runs.
 - **Prefer `@preconcurrency` conformance over `@preconcurrency import`** — import applies per-file and silently suppresses real errors.

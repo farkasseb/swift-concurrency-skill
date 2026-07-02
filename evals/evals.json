@@ -1,0 +1,78 @@
+{
+  "skill_name": "swift-concurrency",
+  "design_note": "Each eval targets a post-training-cutoff knowledge delta (Swift 6.2-6.4), not reasoning ability. A competent model without the skill gives a confidently wrong answer from stale knowledge. Expectations grade two objective dimensions: correct version gate (which Swift/compiler) and correct deployment-target story (language feature vs OS-gated runtime API). Runner rule: executors must not use web search or documentation MCP tools, so the measured delta is the skill's contribution.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "defer-await-cleanup",
+      "prompt": "We just moved our project to Xcode 27 (Swift 6.4). I have an async function that opens a network connection and I need `await connection.close()` to run on every exit path, including early throws. Our deployment target is still iOS 17. What's the cleanest way to guarantee that cleanup?",
+      "expected_output": "Recommends await directly inside defer (SE-0493), notes it works on any deployment target, rejects the Task-in-defer workaround",
+      "files": [],
+      "expectations": [
+        "Recommends `defer { await connection.close() }` as the primary solution (await directly inside defer)",
+        "States that await-in-defer is a Swift 6.4 language feature usable regardless of deployment target (iOS 17 is fine)",
+        "Does not recommend `defer { Task { ... } }` as the solution (or explicitly rejects it as an anti-pattern)"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "cancellation-shield-availability",
+      "prompt": "I read that Swift now lets you ignore task cancellation while running cleanup. Can I use withTaskCancellationShield in our app? We support iOS 18 and newer. If not, what should I do instead when a cancelled task keeps skipping my cleanup code?",
+      "expected_output": "Confirms the API exists (SE-0504, Swift 6.4), states the iOS 27+ runtime gate, offers pre-27 fallback",
+      "files": [],
+      "expectations": [
+        "Correctly identifies withTaskCancellationShield as a real API (SE-0504 / Swift 6.4), not a hallucination or unknown",
+        "States it requires iOS 27+ / macOS 27+ (or aligned tvOS/watchOS/visionOS releases) at runtime and therefore cannot be used unconditionally with an iOS 18 deployment target",
+        "Offers a working pre-iOS-27 alternative such as `await Task { ... }.value` to break out of the task tree, or #available-gated adoption"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "throwing-task-warning",
+      "prompt": "After updating to Xcode 27, I'm getting warnings like 'unstructured throwing task created by init(name:priority:operation:) is not used, which may accidentally ignore errors thrown inside the task' all over our codebase. What changed, and what's the right way to fix these? Some of them are fire-and-forget analytics uploads where we genuinely don't care about failures.",
+      "expected_output": "Identifies SE-0520 (@discardableResult removed from throwing Task inits in Swift 6.4) and gives ranked fixes",
+      "files": [],
+      "expectations": [
+        "Explains the cause: Swift 6.4 removed @discardableResult from throwing Task/Task.detached initializers (SE-0520)",
+        "Recommends handling errors inside the task or storing/awaiting the task value as the primary fixes",
+        "For genuine fire-and-forget cases, recommends explicit discard (`_ = Task { ... }`) or do/catch inside the closure — not removing `try` or globally suppressing the diagnostic"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "weak-let-sendable",
+      "prompt": "I have `final class ConnectionPool: Sendable` and need a weak back-reference to its owning coordinator. The compiler historically forced weak properties to be var, which breaks Sendable conformance. Is there a way to do this now without resorting to @unchecked Sendable? We're on the Swift 6.3 toolchain (Xcode 26.6).",
+      "expected_output": "weak let since Swift 6.3 (SE-0481), no flag or OS gate for declarations",
+      "files": [],
+      "expectations": [
+        "States that `weak let` is legal since Swift 6.3 (SE-0481) and solves exactly this problem",
+        "Does not claim weak let declarations require a feature flag or a minimum OS version",
+        "Shows or describes the weak let stored property pattern inside a Sendable class"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "nonisolated-async-isolation",
+      "prompt": "In our app (Xcode 27 project, Approachable Concurrency enabled, Swift 6 language mode), I have `class ImageProcessor { func process(_ data: Data) async -> UIImage }` — no isolation annotations. When I call it from a @MainActor view model, which thread does process() run on? It's doing heavy decoding and I think it's blocking the UI. How do I fix it?",
+      "expected_output": "With NonisolatedNonsendingByDefault the method inherits the caller's actor (MainActor); fix with @concurrent",
+      "files": [],
+      "expectations": [
+        "States that with Approachable Concurrency (NonisolatedNonsendingByDefault), the nonisolated async method inherits the caller's isolation and runs on the MainActor in this scenario",
+        "Recommends @concurrent as the primary way to move the work to the generic executor (not Task.detached)",
+        "Notes that the answer depends on the NonisolatedNonsendingByDefault / Approachable Concurrency setting rather than being unconditional"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "task-immediate-availability",
+      "prompt": "Is Task.immediate just a compiler-level feature? We build with the latest Xcode but still deploy to iOS 17. I want to use it in a gesture handler so the first part of the work happens synchronously before the runloop hop. Will that work on iOS 17 devices?",
+      "expected_output": "SE-0472, Swift 6.2 compiler but iOS 26+ runtime gate — not usable unconditionally on iOS 17",
+      "files": [],
+      "expectations": [
+        "Correctly identifies Task.immediate as a real API (SE-0472, shipped with Swift 6.2)",
+        "States it is runtime-gated to iOS 26+ / macOS 26+ (or aligned tvOS/watchOS/visionOS releases) and will not run unconditionally on iOS 17 — availability handling required",
+        "Explains the distinction between compiler-only language features (any deployment target) and runtime-gated APIs (minimum OS), applying it to this case"
+      ]
+    }
+  ]
+}

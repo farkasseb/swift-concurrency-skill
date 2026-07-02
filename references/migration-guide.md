@@ -181,11 +181,12 @@ await MainActor.run {
 
 ## SwiftUI View Isolation {#swiftui}
 
-As of Xcode 16+, SwiftUI's `View` protocol uses per-member isolation:
-- `body` is `@MainActor`
-- Other members of a `View` type are NOT automatically MainActor (unless the type itself is)
+The isolation of `View` changed with the SDK, not just the compiler:
 
-**Recommendation**: All SwiftUI views should be `@MainActor` isolated (either explicitly or via default isolation). With default MainActor isolation enabled, this happens automatically.
+- **iOS 18-era SDKs (Xcode 16–18)**: per-member isolation — `body` is `@MainActor`, other members of a conforming type are NOT automatically MainActor.
+- **iOS 26+ SDKs (Xcode 26/27)**: the entire `View` protocol is `@preconcurrency @MainActor` (verified in the SDK's SwiftUICore swiftinterface). A type whose primary declaration conforms to `View` is inferred `@MainActor` in full — all its members, not just `body`.
+
+**Recommendation**: don't rely on the inference rules — make SwiftUI views `@MainActor` explicitly or via default MainActor isolation. Same end state on every SDK, and the intent is visible in source.
 
 ---
 

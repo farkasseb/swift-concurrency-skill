@@ -250,7 +250,7 @@ func search(_ query: String) {
 }
 ```
 
-`Task.sleep` throws `CancellationError` if cancelled while sleeping — no explicit check needed there. But check `Task.isCancelled` after any other work.
+`Task.sleep` throws `CancellationError` if cancelled while sleeping. With `try await` in a throwing context that alone exits the task; with `try?` (as above) the error is swallowed and execution continues — that's why the `guard !Task.isCancelled` after the sleep is required, and after any other work.
 
 ---
 
@@ -320,6 +320,8 @@ func decode(_ data: Data) -> Model { ... }
     display(await model)
 }
 ```
+
+**The offload only works if the sync function is nonisolated.** Under default MainActor isolation (recommended for app modules), an unannotated local function is implicitly `@MainActor` — the `async let` child then hops back to the main actor and nothing is offloaded. Mark the sync function `nonisolated` (or keep it in a nonisolated-default library module). Verified empirically: with `-default-isolation MainActor` the child runs on the main thread; without it, on the generic executor — including under `NonisolatedNonsendingByDefault`, which does not change `async let` semantics.
 
 ---
 
@@ -449,7 +451,7 @@ func locationManager(_ manager: CLLocationManager, didFailWithError error: Error
 ### Critical rules
 
 - **Resume exactly once** — resuming zero times = leak; resuming twice = crash
-- Use `withCheckedContinuation` (debug checks) or `withUnsafeContinuation` (no checks, slightly faster)
+- Use `withCheckedContinuation` (misuse checks in all build configurations — traps on double resume, warns on leaked continuations, per SE-0300) or `withUnsafeContinuation` (no checks, slightly faster)
 - Continuation does NOT suspend at call site when isolation matches (SE-0420) — synchronous code before the callback runs immediately
 - Store continuation as optional, nil it after resume to prevent double-resume
 
@@ -497,6 +499,7 @@ Package: `apple/swift-async-algorithms` (v1.0+). Import: `import AsyncAlgorithms
 | `PassthroughSubject` | `AsyncStream` / `AsyncChannel` | `AsyncChannel` has backpressure |
 | `CurrentValueSubject` | `AsyncStream` + initial value | Manual |
 | `@Published` | `@Observable` + `AsyncStream` | Prefer `@Observable` for SwiftUI |
+| `@Published` observation outside SwiftUI | `Observations { model.value }` | SE-0475, iOS 26+ — transactional, coalesced per transaction. Below iOS 26: `AsyncStream` bridge. |
 | `eraseToAnyPublisher()` | `some AsyncSequence<Element, Error>` | Opaque return type (SE-0421) |
 
 ### AsyncChannel (with backpressure)
