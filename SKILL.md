@@ -1,21 +1,6 @@
 ---
 name: swift-concurrency
-description: >
-  Swift 6.2–6.4 Approachable Concurrency expert. Corrects wrong answers about
-  nonisolated async isolation (SE-0461), @concurrent, default actor isolation
-  (SE-0466), isolated conformances (SE-0470), await in defer bodies (SE-0493,
-  Swift 6.4 — telling the user "you can't await in defer" or suggesting
-  defer { Task { } } is WRONG), task cancellation shields (SE-0504), weak let
-  (SE-0481), Task.immediate. TRIGGER: async/await, actors, Sendable, Task,
-  @MainActor, nonisolated, @concurrent, AsyncSequence, Swift 6 migration,
-  concurrency warnings ("Sending value of non-Sendable type", "cannot cross
-  actor boundary", "unstructured throwing task ... is not used"
-  [#NoUseUnstructuredThrowingTask], protocol conformance isolation mismatch),
-  choosing actor vs Mutex vs @MainActor, NonisolatedNonsendingByDefault,
-  wrong-thread debugging, Combine + @MainActor crashes, and any "which
-  iOS version does this concurrency API need" question. Training data
-  predates Swift 6.2–6.4 — without this skill, answers about async isolation
-  behavior and feature availability will be wrong.
+description: "Swift 6.2–6.4 concurrency and API availability. Use for async/await, actors, Sendable, Task, @MainActor, nonisolated, AsyncSequence, Swift 6 migration, wrong-thread debugging, or actor vs Mutex decisions. Covers caller isolation when NonisolatedNonsendingByDefault is enabled (SE-0461), @concurrent, default actor isolation (SE-0466), isolated conformances (SE-0470), await in defer (SE-0493), cancellation shields (SE-0504), weak let (SE-0481), and Task.immediate. Diagnostics: \"Sending value of non-Sendable type\", \"cannot cross actor boundary\", \"unstructured throwing task ... is not used\" / #NoUseUnstructuredThrowingTask, conformance isolation mismatches, and Combine + @MainActor crashes."
 ---
 
 # Swift 6.2–6.4 + Approachable Concurrency
