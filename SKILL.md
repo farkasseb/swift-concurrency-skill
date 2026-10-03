@@ -1,203 +1,111 @@
 ---
 name: swift-concurrency
-description: "Swift 6.2–6.4 concurrency and API availability. Use for async/await, actors, Sendable, Task, @MainActor, nonisolated, AsyncSequence, Swift 6 migration, wrong-thread debugging, or actor vs Mutex decisions. Covers caller isolation when NonisolatedNonsendingByDefault is enabled (SE-0461), @concurrent, default actor isolation (SE-0466), isolated conformances (SE-0470), await in defer (SE-0493), cancellation shields (SE-0504), weak let (SE-0481), and Task.immediate. Diagnostics: \"Sending value of non-Sendable type\", \"cannot cross actor boundary\", \"unstructured throwing task ... is not used\" / #NoUseUnstructuredThrowingTask, conformance isolation mismatches, and Combine + @MainActor crashes."
+description: "Swift concurrency for Swift 6.2-6.4 and Xcode 26-27: async/await, actors, @MainActor, Sendable, Task, and data races. Use when a build shows concurrency errors or warnings (\"sending 'x' risks causing data races\", \"main actor-isolated\", \"not concurrency-safe\", \"unstructured throwing task ... is not used\"), when async code blocks the UI or runs on the wrong thread, for cancellation, cleanup, or actor-reentrancy bugs, Combine queue crashes, Swift 6 migration, Approachable Concurrency or default isolation settings, and newer features such as @concurrent, Task.immediate, weak let, ~Sendable, await in defer, and task cancellation shields."
 ---
 
-# Swift 6.2–6.4 + Approachable Concurrency
+# Swift Concurrency (Swift 6.2-6.4)
 
-## CRITICAL: Top 7 Things Claude Gets Wrong
+Xcode 27 ships Swift 6.4. Xcode 26.x ships Swift 6.2 or 6.3 depending on the point release; `swift --version` settles it. Much of this area changed after most models' training data, so prefer this skill over recalled behavior when they disagree.
 
-### 1. nonisolated async functions NOW inherit caller's isolation
+## Step 1: Read the project's settings
 
-With `NonisolatedNonsendingByDefault` enabled (part of Approachable Concurrency):
+Where a nonisolated `async` function runs depends on build settings. Check them before answering, and state the assumption when you can't see them.
 
-```swift
-// OLD behavior (pre-SE-0461): runs on generic executor
-// NEW behavior (with NonisolatedNonsendingByDefault): stays on caller's actor
-class MyClass {
-    func doWork() async { /* WHERE does this run? Depends on the flag! */ }
-}
-```
+**Xcode projects:** find the effective settings for the relevant target and configuration. Values can come from `project.pbxproj` (project and target level), referenced `.xcconfig` files, and command-line overrides; `xcodebuild -showBuildSettings -target <name>` or the actual compiler invocation settles it. The settings that matter:
 
-- **Without flag**: nonisolated async = always switches off the actor to the generic executor (SE-0338 behavior)
-- **With flag**: nonisolated async = stays on caller's actor (`nonisolated(nonsending)`)
-- Use `@concurrent` to explicitly switch off the actor to the generic executor
-- **ALWAYS check project settings before answering isolation questions**
+- `SWIFT_VERSION`: language mode, `5.0` or `6.0`.
+- `SWIFT_APPROACHABLE_CONCURRENCY = YES`: turns on the Approachable Concurrency upcoming features (below).
+- `SWIFT_UPCOMING_FEATURE_NONISOLATED_NONSENDING_BY_DEFAULT`: explicit override of the most important one.
+- `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`: module-wide default isolation.
+- `SWIFT_STRICT_CONCURRENCY`: `minimal` / `targeted` / `complete` checking in Swift 5 mode. Swift 6 mode is always complete.
 
-### 2. @concurrent is NOT Task.detached
+**Swift packages** (`Package.swift`; target `swiftSettings` first, then package-level defaults):
 
-```swift
-// @concurrent: implies nonisolated, runs on generic executor
-// CANNOT combine with @MainActor, isolated params, or @isolated(any)
-@concurrent func decode(_ data: Data) async -> Model { ... }
+- `.swiftLanguageMode(.v5)` / `.v6`, or package `swiftLanguageModes:`. With `swift-tools-version: 6.0` or later and no explicit mode, targets build in Swift 6 mode. The tools version is not the language mode.
+- `.enableUpcomingFeature("ApproachableConcurrency")`: enables all five Approachable Concurrency features at once (accepted by Swift 6.3 and 6.4). Also look for the features enabled individually, such as `.enableUpcomingFeature("NonisolatedNonsendingByDefault")` and `.enableUpcomingFeature("InferIsolatedConformances")`.
+- `.defaultIsolation(MainActor.self)` (tools 6.2+). Packages default to nonisolated.
+- Default isolation is separate from `ApproachableConcurrency`. Xcode and SwiftPM settings are independent of each other.
 
-// Task.detached: also detaches from priority, task-local values, cancellation hierarchy
-// Almost never the right tool — prefer @concurrent functions
-```
+**New Xcode 26 and 27 app projects** (verified in the Xcode 27 RC and 26.6 templates) set `SWIFT_VERSION = 5.0`, `SWIFT_APPROACHABLE_CONCURRENCY = YES`, and `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`. A fresh app is therefore Swift 5 mode, all five Approachable Concurrency features on, and eligible unannotated declarations default to MainActor (see the inference exceptions in [references/execution-and-settings.md](references/execution-and-settings.md)).
 
-### 3. Combine + @MainActor = runtime crash
+**Swift 6.4 defaults:** `NonisolatedNonsendingByDefault` and `InferIsolatedConformances` are still opt-in, even in Swift 6 mode. Setting default isolation to MainActor also turns on `InferIsolatedConformances`.
 
-Combine APIs generally do not model sendability or isolation correctly. When `receive(on:)` moves execution to a background queue, closure inference plus queue hopping triggers runtime actor-isolation failures:
+**Approachable Concurrency and default isolation are independent settings.** Approachable Concurrency enables five upcoming features: `DisableOutwardActorInference`, `GlobalActorIsolatedTypesUsability`, `InferSendableFromCaptures`, `InferIsolatedConformances`, `NonisolatedNonsendingByDefault`. Swift 6 mode already includes the first three, so there it adds the last two. Default actor isolation only changes what unannotated declarations are isolated to.
 
-```swift
-@MainActor class Foo {
-    func setup() {
-        Just(1)
-            .receive(on: DispatchQueue.global())  // moves to background
-            .sink { value in
-                // CRASH: _dispatch_assert_queue_fail
-                // Compiler inserted MainActor check, but we're on background
-            }
-    }
-}
-```
+## Step 2: Where code runs
 
-Fix: Add `@Sendable` to closure, or avoid `receive(on:)` with MainActor contexts.
-Escape hatch: `-disable-dynamic-actor-isolation` compiler flag (disables runtime checks).
+| Code | Runs on |
+|---|---|
+| `@MainActor` function, or member of a `@MainActor` type | main actor |
+| actor method | that actor |
+| nonisolated `async` function, `NonisolatedNonsendingByDefault` off | nonisolated; the task's preferred executor, or the default global concurrent executor |
+| nonisolated `async` function, `NonisolatedNonsendingByDefault` on | the caller's actor: it is `nonisolated(nonsending)` |
+| `@concurrent` async function | nonisolated; the task's preferred executor, or the default global concurrent executor |
+| synchronous nonisolated function | the caller's thread |
+| `Task { }` | the enclosing global actor (for example `@MainActor`). Inside an actor or with an `isolated` parameter, only if the closure captures that actor (`self` or the parameter); otherwise nonisolated. Inherits priority and task-locals. |
+| `Task { }` inside any nonisolated function (sync, `nonisolated(nonsending)`, or `@concurrent`) | nonisolated, even when the function itself runs on the caller's actor |
+| `Task.detached { }` | nonisolated; drops priority and task-locals |
+| `async let` / task-group child | concurrent executor, unless the called function is isolated. Under default MainActor isolation an unannotated sync function is `@MainActor`, so `async let x = work()` runs back on main. |
 
-### 4. Nested Tasks do NOT propagate cancellation
+Consequences:
 
-```swift
-Task {
-    Task { /* NOT cancelled when outer task is cancelled */ }
-}
-// Only async let and TaskGroup propagate cancellation to child tasks
-```
+- To move heavy work off the caller's actor, mark the function `@concurrent` (Swift 6.2, any deployment target). Prefer it over `Task.detached`, which is unstructured and also drops priority and task-locals.
+- `@concurrent` applies only to async functions and implies `nonisolated`. It cannot be combined with a global actor, an `isolated` parameter, or `@isolated(any)`.
+- A `@concurrent` method on a non-Sendable class still has to send `self`. Calling it on an instance stored in a `@MainActor` type fails with "sending 'self.x' risks causing data races". Make the type Sendable (a struct of Sendable values, or a final class with only `let` Sendable state), or make the work a `static`/free function that takes Sendable inputs.
+- An unstructured `Task { }` is not cancelled when the enclosing task is cancelled. Only `async let` and task groups propagate cancellation.
 
-Nested `Task { Task { } }` inherits actor context and priority, but NOT cancellation.
+Details, `#isolation`, and the default-isolation inference rules: [references/execution-and-settings.md](references/execution-and-settings.md).
 
-### 5. defer CAN await now (Swift 6.4)
+## Step 3: Choose isolation for a type
 
-```swift
-func process() async throws {
-    let handle = try await acquire()
-    defer { await handle.release() }   // legal in Swift 6.4, ANY deployment target
-    try await use(handle)
-}
-```
+1. **Framework protocols decide first.** SwiftUI views and UIKit/AppKit types are `@MainActor`. App Intents types are `Sendable` and `perform()` is nonisolated: mark `perform()` `@MainActor` or hop inside it, but don't make the intent type `@MainActor`. When a framework-specific skill is available (for example Apple's `swiftui-specialist` or `app-intents-specialist`), follow it for that framework's types.
+2. **`@Observable` models read by SwiftUI views:** `@MainActor`, unless the module already defaults to MainActor.
+3. **Plain logic and data types:** nonisolated and non-Sendable (or a Sendable struct). Under default MainActor isolation, write `nonisolated` on the type. They are usable from any isolation, and their conformances have no isolation mismatch.
+4. **Synchronous access to shared mutable state from several isolation domains:** `Mutex` (iOS 18+ / macOS 15+) or `OSAllocatedUnfairLock` (iOS 16+ / macOS 13+).
+5. **`actor`:** when the design needs its own serialized isolation domain; see the checklist in [references/design-patterns.md](references/design-patterns.md). For stateless computation, prefer functions or structs.
 
-- Implicitly awaited at every scope exit; runs to completion before return. Inherits enclosing isolation.
-- Language-only feature — works targeting old iOS versions; only the compiler must be 6.4 (Xcode 27).
-- The pre-6.4 habit `defer { Task { await cleanup() } }` is an **anti-pattern**: cleanup races the function's return and errors vanish. Don't suggest it on Swift 6.4.
-- Details + cancellation caveats: [references/swift-6_3-6_4-changes.md](references/swift-6_3-6_4-changes.md)
+Libraries should expose nonisolated APIs and let callers choose where to run them.
 
-### 6. Swift 6.4 warns on unused throwing Tasks (SE-0520)
+## Step 4: Fix the diagnostic
 
-`Task { try await work() }` now emits `unstructured throwing task ... is not used [#NoUseUnstructuredThrowingTask]`. Fix by handling the error inside, or `let task = ...; try await task.value` — NOT by stripping `try` or silently swallowing. See [references/swift-6_3-6_4-changes.md](references/swift-6_3-6_4-changes.md).
+- **"sending 'x' risks causing data races"**: the value is used after crossing an isolation boundary, or it belongs to an actor's region. Stop using it after the send, create it on the destination side, mark the parameter or result `sending`, or make the type Sendable.
+- **"capture of 'x' with non-Sendable type in a `@Sendable` closure"**: capture Sendable values instead, or run the closure in the same isolation as the value.
+- **"main actor-isolated ... cannot satisfy nonisolated requirement"**, in order of preference:
+  1. A `nonisolated` witness, when everything it touches is accessible without isolation, such as immutable (`let`) stored properties of Sendable type. A `var`, even of a Sendable type, or a `let` of a non-Sendable type is still isolated.
+  2. An isolated conformance, `extension T: @MainActor P`, when it needs main-actor state. It cannot satisfy a `Sendable` or `SendableMetatype` requirement.
+  3. `InferIsolatedConformances` to get (2) module-wide.
+  4. A `@preconcurrency` conformance, for a protocol you don't own that predates concurrency.
+- **"main actor-isolated conformance of 'T' to 'Decodable' cannot be used in ... context"**: default MainActor isolation made the type and its conformances `@MainActor`. Mark the type `nonisolated struct T: Codable`, or only the conformance: `extension T: nonisolated Codable {}`.
+- **Global or static mutable state**, in order of preference: `let` of a Sendable type, then `@MainActor`, then an actor or `Mutex`, then `nonisolated(unsafe)` as a last resort. Adding `@unchecked Sendable` to the type does not fix a warning about the variable.
+- **`@MainActor` subclass of a non-Sendable class:** not implicitly Sendable (SE-0434). Adding `: Sendable` is a warning in Swift 6.4 ("will be an error in a future Swift language mode"). Drop the non-Sendable superclass, or use `@unchecked Sendable` only if the subclass protects both its own and the inherited mutable state.
+- **Missing annotations in a module you don't control:** prefer a `@preconcurrency` conformance over `@preconcurrency import`, which applies to the whole file and hides real errors.
+- **`_dispatch_assert_queue_fail` in Combine or a legacy callback:** check the outer callback's isolation before adding an inner task hop; see [references/migration.md](references/migration.md).
 
-### 7. "Approachable Concurrency" ≠ Default Actor Isolation
+## Step 5: Check the version and deployment target
 
-These are **independent** settings:
-- **Approachable Concurrency** (Xcode build setting) = in Swift 6 mode, enables two additional flags: `NonisolatedNonsendingByDefault` + `InferIsolatedConformances`. In Swift 5 mode, enables all 5 flags (see [swift-6_2-changes.md](references/swift-6_2-changes.md)).
-- **Default Actor Isolation** (separate setting) = sets module default to `@MainActor`
-- Setting MainActor default **implicitly** enables `InferIsolatedConformances`
-- You can have one without the other
+Separate compiler features from runtime features:
 
-## Routing: When to Read Each Reference
+- **Compiler features** need only the new compiler and work at any deployment target: `@concurrent`, `nonisolated(nonsending)`, default isolation (6.2), `weak let` (6.3), `await` in `defer`, `~Sendable`, the unused-throwing-Task warning (6.4). Rules for the newest ones:
+  - `await` in `defer` (SE-0493, 6.4): write `defer { await x.close() }` directly. `defer { Task { ... } }` races the return and loses errors.
+  - Unused throwing `Task` warning (SE-0520, 6.4): throwing `Task` initializers lost `@discardableResult`. Handle errors inside the task, keep and await the task, or discard deliberately with `_ = Task { ... }`.
+  - `weak let` (SE-0481, 6.3) lets a `Sendable` class hold a weak reference; the referenced type must itself be `Sendable`.
+  - Public non-frozen types are never implicitly `Sendable`. To mark a type deliberately non-Sendable, declare `: ~Sendable` on it (SE-0518, 6.4), not a dummy stored property or an unavailable conformance. Swift 6.3 rejects `~Sendable`; for code that must still build there, see the reference.
+- **Runtime APIs** need a minimum OS whatever the compiler: `Mutex` (iOS 18), `Task.immediate`, `Observations`, reading `Task.name` (iOS 26), `withTaskCancellationShield`, `Continuation` (iOS 27).
 
-- **Migrating to Swift 6 or fixing concurrency warnings** → Read [references/migration-guide.md](references/migration-guide.md)
-- **If codebase uses Combine with Swift 6** → You MUST read [references/migration-guide.md](references/migration-guide.md)
-- **Choosing between actor / Mutex / @MainActor / nonisolated** → Read [references/isolation-patterns.md](references/isolation-patterns.md)
-- **Using @concurrent, nonisolated(nonsending), default isolation, isolated conformances, Task.immediate, Observations, task naming** → Read [references/swift-6_2-changes.md](references/swift-6_2-changes.md)
-- **await in defer, cancellation shields, weak let, ~Sendable, SE-0520 warning, anything Swift 6.3/6.4 or Xcode 26.6/27** → Read [references/swift-6_3-6_4-changes.md](references/swift-6_3-6_4-changes.md)
-- **"What iOS version does this concurrency API need?"** → Feature Availability Matrix in [references/concurrency-glossary.md](references/concurrency-glossary.md)
-- **Enabling Approachable Concurrency in SPM packages** → Read [references/swift-6_2-changes.md](references/swift-6_2-changes.md) (SPM section)
-- **Structured concurrency (async let vs TaskGroup)** → Read [references/isolation-patterns.md](references/isolation-patterns.md) (section 11)
-- **Bridging callback/delegate APIs** → Read [references/isolation-patterns.md](references/isolation-patterns.md) (section 12: Continuations)
-- **Replacing Combine with AsyncSequence/AsyncAlgorithms** → Read [references/isolation-patterns.md](references/isolation-patterns.md) (section 13)
-- **Testing concurrent code** → Read [references/isolation-patterns.md](references/isolation-patterns.md) (section 14)
-- **Global/static variable warnings** → Read [references/isolation-patterns.md](references/isolation-patterns.md) (section 15)
-- **Encountering an unfamiliar concurrency keyword or attribute** → Read [references/concurrency-glossary.md](references/concurrency-glossary.md)
-- **For full SE proposal text** → Use `mcp__cupertino__read_document` with `swift-evolution://SE-XXXX`
+Full matrix and per-feature notes: [references/versions-and-availability.md](references/versions-and-availability.md).
 
-## Decision Trees
+## Working rules
 
-### How should I isolate this type?
+- Name the settings you assumed whenever an answer depends on them.
+- Prefer structured concurrency (`async let`, task groups) over `Task { }`, and `@concurrent` over `Task.detached`.
+- For new code, prefer `AsyncSequence`, `Observation`, and `swift-async-algorithms` over new Combine pipelines.
+- Treat `@unchecked Sendable`, `nonisolated(unsafe)`, `@preconcurrency import`, and `-disable-dynamic-actor-isolation` as tracked debt, not fixes.
+- For moving tests from XCTest to Swift Testing, use the `modernize-tests` skill if it is available. Swift Testing runs tests in parallel on arbitrary tasks, so add `@MainActor` only where a test needs it.
 
-1. Is it a UI-facing type or model presented in the UI? → `@MainActor`
-2. Is it a plain data/logic type with no concurrency needs? → Leave nonisolated (non-Sendable). See Non-Sendable First Design in [isolation-patterns.md](references/isolation-patterns.md)
-3. Does it need to protect mutable state accessed from multiple isolation domains AND you can't use MainActor? → Consider actor (but read justification checklist in [isolation-patterns.md](references/isolation-patterns.md) first)
-4. Need synchronous thread-safe access to a single value? → `Mutex` (iOS 18+)
+## References
 
-### I have a Sendable error
-
-1. Is the type a value type with all Sendable properties? → Conform to `Sendable`
-2. Is it a `@MainActor` class? → Usually implicitly `Sendable`, BUT NOT if it subclasses a nonisolated non-`Sendable` type (SE-0434). The fix in that case is `@unchecked Sendable` (with discipline) or drop the non-Sendable parent — **explicitly adding `: Sendable` to the subclass is a compile error**.
-3. Is the error "Sending main-actor-isolated value..." across an isolation boundary? → **Mark the parameter `sending`** as the surgical fix (SE-0430). Alternatives: make the value type a `struct`, restructure so the value is built nonisolated, or `@unchecked Sendable` with locking.
-4. Can region-based isolation prove the usage is safe? → See [isolation-patterns.md](references/isolation-patterns.md) (Region-Based Isolation)
-5. Is it a class with internal locking? → `@unchecked Sendable`
-6. Is the error from an API you don't control? → Prefer `@preconcurrency` on the conformance over `@preconcurrency import` (import applies per-file and silently swallows real errors)
-7. Is it a `@MainActor` class conforming to a protocol like `Equatable` and you get an isolation mismatch on the witness? → That's **SE-0470 (Global-Actor Isolated Conformances)**. See "How do I fix a `@MainActor` + protocol conformance error?" decision tree below.
-
-### "Var X is not concurrency-safe because it is non-isolated global shared mutable state"
-
-Rank fixes from best (highest safety + clearest intent) to worst (escape hatch). **Stick to this order — `nonisolated(unsafe)` is LAST RESORT.**
-
-1. **`let` constant** — best if the value is actually immutable. Eliminates the warning at the language level.
-2. **`@MainActor`** — if access is UI-driven / main-thread-only. Compiler-verified; preferred for app-level singletons.
-3. **`actor` wrapper** — if mutation happens from multiple isolation domains and async access is acceptable.
-4. **`Mutex` (iOS 18+) or `OSAllocatedUnfairLock` (iOS 16+)** — if you need synchronous thread-safe access.
-5. **`nonisolated(unsafe)`** — LAST RESORT. Only when external invariants guarantee safety (e.g. set once at startup before any concurrency, never mutated again). The compiler does no checking.
-
-**Anti-pattern to reject**: adding `@unchecked Sendable` to the *type* doesn't address this warning. The warning is on the variable, not the type's Sendable status.
-
-### Code runs on the wrong thread
-
-1. Is `NonisolatedNonsendingByDefault` enabled? → nonisolated async now stays on caller's actor. Add `@concurrent` to switch to generic executor. See [swift-6_2-changes.md](references/swift-6_2-changes.md)
-2. Is default isolation set to MainActor? → Everything not explicitly `nonisolated` runs on main thread
-3. Did you use `Task { }` from `@MainActor`? → Task inherits MainActor context. Move work into an `@concurrent` function, or use `Task.detached` as fallback
-4. Did you use `Task { }` inside a nonisolated function (sync, `nonisolated(nonsending)` async, OR `@concurrent` async)? → **The unstructured `Task { }` does NOT inherit caller's actor isolation** — this rule is consistent across all three nonisolated function shapes (SE-0461). Capturing non-`Sendable` values from the enclosing context is a compile error.
-
-### How do I fix a `@MainActor` type's protocol conformance isolation mismatch?
-
-This is **SE-0470 (Global-Actor Isolated Conformances)**, implemented in Swift 6.2. The error fires when the protocol's requirement is `nonisolated` (e.g. `Equatable.==`) but the conforming type is `@MainActor`-isolated.
-
-Ranked fixes for `@MainActor class Foo: Equatable { static func ==(...) {...} }`:
-
-1. **`nonisolated static func ==`** — best when the body only reads `let` properties or other Sendable state. The protocol witness explicitly opts out of MainActor isolation. Most common, simplest, no flag required.
-2. **`@MainActor Equatable`** (isolated conformance) — use when the body MUST access MainActor-isolated state. Trade-off: an isolated conformance cannot satisfy a `Sendable` or `SendableMetatype` requirement, so the type can't cross those boundaries via this conformance.
-3. **`InferIsolatedConformances` upcoming feature** — module-wide; conformances of `@MainActor` types automatically get `@MainActor` isolation. Right tool when you want #2 broadly across the module.
-4. Don't refactor to a `struct` "to dodge the issue" if the type genuinely needs reference semantics — that's off-topic.
-
-## Recommended Build Settings (WWDC 2025, Doug Gregor)
-
-| Setting | UI/App Modules | Libraries/Services |
-|---------|---------------|-------------------|
-| Approachable Concurrency | ON | ON |
-| Default Actor Isolation | `MainActor` | `nonisolated` (default) |
-| Swift Language Mode | 6 | 6 |
-
-- Libraries should provide `nonisolated` APIs — let callers decide whether to offload
-- Model classes should be `@MainActor` or non-Sendable — avoid making them actors unless you have a clear justification (see actor checklist in isolation-patterns.md)
-- Progressive disclosure: single-threaded → async → concurrent → actors
-- **Note on @MainActor + Sendable**: Usually implicitly Sendable, but NOT always — see SE-0434 subclass exception in [isolation-patterns.md](references/isolation-patterns.md). Check class hierarchy before assuming.
-
-## Determining Project Concurrency Settings
-
-Before answering concurrency questions, CHECK the project's settings:
-
-**For SPM packages** — grep `Package.swift` for:
-- `.swiftLanguageMode(.v6)` or `.swiftLanguageMode(.v5)` (per-target, this is what matters)
-- `.enableUpcomingFeature("NonisolatedNonsendingByDefault")`
-- `.enableUpcomingFeature("InferIsolatedConformances")`
-- `.defaultIsolation(MainActor.self)`
-- `swift-tools-version:` (only tells you manifest API version, NOT target language mode)
-
-**For Xcode projects** — grep `project.pbxproj` for:
-- `SWIFT_VERSION` (language mode: 5, 6)
-- `SWIFT_STRICT_CONCURRENCY` (minimal, targeted, complete)
-- `SWIFT_APPROACHABLE_CONCURRENCY = YES`
-- `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`
-- `SWIFT_UPCOMING_FEATURE_NONISOLATED_NONSENDING_BY_DEFAULT`
-
-**Important**: `swift-tools-version` is NOT language mode. A package can be `swift-tools-version: 6.2` while targets use `.swiftLanguageMode(.v5)`. Always check **target-level** `swiftSettings` first, then fall back to package-level defaults.
-
-## Behavioral Rules
-
-- **NEVER write new Combine code.** When encountering existing Combine: understand pitfalls, bridge with concurrency, or migrate to AsyncSequence/AsyncAlgorithms.
-- **For Combine replacement**: use `swift-async-algorithms` package — provides `merge`, `combineLatest`, `zip`, `debounce`, `throttle`, `chain`, `removeDuplicates`, `chunks`.
-- **Favor `@concurrent` over `Task.detached`.** Task.detached also detaches priority and task-locals.
-- **Use actors sparingly.** Prefer @MainActor or non-Sendable types. Actors are for: non-Sendable state + atomic mutations + can't be on MainActor.
-- **Always distinguish language features from runtime features when noting availability.** Language features need only the compiler and work on any deployment target: `@concurrent`, default isolation (Swift 6.2), `weak let` (6.3), `await` in `defer` (6.4). Runtime features need a minimum OS regardless of compiler: `Mutex` (iOS 18+), `Task.immediate`/`Observations`/static `Task.name` (iOS 26+), `withTaskCancellationShield`/move-only `Continuation` (iOS 27+). For iOS 16 deployment: use `OSAllocatedUnfairLock` or `@unchecked Sendable` with `NSLock` instead of Mutex. Full table: glossary Feature Availability Matrix.
-- **Check NonisolatedNonsendingByDefault before answering** any question about where async code runs.
-- **Prefer `@preconcurrency` conformance over `@preconcurrency import`** — import applies per-file and silently suppresses real errors.
+- [references/execution-and-settings.md](references/execution-and-settings.md): SE-0461 details, task executor preference, `#isolation`, SE-0466 inference rules, SE-0470 isolated conformances, SwiftPM snippets, `swift package migrate`.
+- [references/versions-and-availability.md](references/versions-and-availability.md): Swift 6.2-6.4 additions, compiler vs runtime gates, proposals accepted but not yet shipped.
+- [references/design-patterns.md](references/design-patterns.md): actor checklist, reentrancy, Mutex vs actor, offloading synchronous work, cancel-and-replace, cancellable callback bridges, `sending`.
+- [references/migration.md](references/migration.md): migration order, Combine and legacy callback crashes, the three uses of `@preconcurrency`, escape hatches.
+- Proposal text: `https://github.com/swiftlang/swift-evolution/tree/main/proposals` (file names start with the four-digit SE number).

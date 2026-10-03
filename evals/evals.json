@@ -1,6 +1,6 @@
 {
   "skill_name": "swift-concurrency",
-  "design_note": "Each eval targets a post-training-cutoff knowledge delta (Swift 6.2-6.4), not reasoning ability. A competent model without the skill gives a confidently wrong answer from stale knowledge. Expectations grade two objective dimensions: correct version gate (which Swift/compiler) and correct deployment-target story (language feature vs OS-gated runtime API). Runner rule: executors must not use web search or documentation MCP tools, so the measured delta is the skill's contribution.",
+  "design_note": "Evals 1-6 target facts that changed after most models' training (Swift 6.2-6.4 behavior and availability gates). Evals 7-8 give project files and check that the answer is derived from the build settings. Evals 9-10 check Swift 6.4 facts that older material gets wrong. Eval 12 checks a reentrancy bug (stale results after cancellation). Eval 11 checks that framework-imposed isolation wins and that the answer agrees with Apple's app-intents-specialist skill. Evals 13-16 cover checked lock wrappers, executor preference, replacement-task cleanup and legacy callback entry. Runner rule: executors must not use web search or documentation tools, so the measured difference is the skill's contribution. Where an answer includes code, compile it with the Swift 6.4 toolchain (use -emit-sil so region-isolation errors appear) as an extra check.",
   "evals": [
     {
       "id": 1,
@@ -41,24 +41,25 @@
     {
       "id": 4,
       "name": "weak-let-sendable",
-      "prompt": "I have `final class ConnectionPool: Sendable` and need a weak back-reference to its owning coordinator. The compiler historically forced weak properties to be var, which breaks Sendable conformance. Is there a way to do this now without resorting to @unchecked Sendable? We're on the Swift 6.3 toolchain (Xcode 26.6).",
-      "expected_output": "weak let since Swift 6.3 (SE-0481), no flag or OS gate for declarations",
+      "prompt": "I have `final class ConnectionPool: Sendable` and need a weak back-reference to its owning `Coordinator` class. The compiler historically forced weak properties to be var, which breaks Sendable conformance. Is there a way to do this now without resorting to @unchecked Sendable? We're on the Swift 6.3 toolchain (Xcode 26.6).",
+      "expected_output": "weak let since Swift 6.3 (SE-0481), no flag or OS gate for declarations; the referenced Coordinator must itself be Sendable",
       "files": [],
       "expectations": [
-        "States that `weak let` is legal since Swift 6.3 (SE-0481) and solves exactly this problem",
+        "States that `weak let` is legal since Swift 6.3 (SE-0481) and solves this problem",
         "Does not claim weak let declarations require a feature flag or a minimum OS version",
-        "Shows or describes the weak let stored property pattern inside a Sendable class"
+        "States that the referenced type (Coordinator) must itself be Sendable for the property to be allowed in a Sendable class, or shows code where Coordinator is Sendable",
+        "Shows or describes the `weak let` stored property pattern inside the Sendable class"
       ]
     },
     {
       "id": 5,
       "name": "nonisolated-async-isolation",
-      "prompt": "In our app (Xcode 27 project, Approachable Concurrency enabled, Swift 6 language mode), I have `class ImageProcessor { func process(_ data: Data) async -> UIImage }` — no isolation annotations. When I call it from a @MainActor view model, which thread does process() run on? It's doing heavy decoding and I think it's blocking the UI. How do I fix it?",
+      "prompt": "In our app (Xcode 27 project, Approachable Concurrency enabled, Swift 6 language mode, Default Actor Isolation set to nonisolated), I have `class ImageProcessor { func process(_ data: Data) async -> UIImage }` — no isolation annotations. When I call it from a @MainActor view model, which thread does process() run on? It's doing heavy decoding and I think it's blocking the UI. How do I fix it?",
       "expected_output": "With NonisolatedNonsendingByDefault the method inherits the caller's actor (MainActor); fix with @concurrent",
       "files": [],
       "expectations": [
-        "States that with Approachable Concurrency (NonisolatedNonsendingByDefault), the nonisolated async method inherits the caller's isolation and runs on the MainActor in this scenario",
-        "Recommends @concurrent as the primary way to move the work to the generic executor (not Task.detached)",
+        "States that with Approachable Concurrency (NonisolatedNonsendingByDefault) in Swift 6 mode, the nonisolated async method inherits the caller's isolation and runs on the main actor in this scenario",
+        "Recommends @concurrent as the primary way to move the work off the main actor (not Task.detached), and handles the non-Sendable `self`: e.g. notes that calling a @concurrent method on a non-Sendable instance stored in a @MainActor type is a 'sending' error, and makes the type Sendable or the function static/free",
         "Notes that the answer depends on the NonisolatedNonsendingByDefault / Approachable Concurrency setting rather than being unconditional"
       ]
     },
@@ -72,6 +73,137 @@
         "Correctly identifies Task.immediate as a real API (SE-0472, shipped with Swift 6.2)",
         "States it is runtime-gated to iOS 26+ / macOS 26+ (or aligned tvOS/watchOS/visionOS releases) and will not run unconditionally on iOS 17 — availability handling required",
         "Explains the distinction between compiler-only language features (any deployment target) and runtime-gated APIs (minimum OS), applying it to this case"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "xcode27-template-settings",
+      "prompt": "This is our app target's build settings excerpt and the class that decodes images. Calling `await processor.process(data)` from a view model makes scrolling stutter. Which thread does `process` run on, and what's the minimal fix?",
+      "expected_output": "Reads the settings: Swift 5 mode, Approachable Concurrency on, default MainActor isolation. The unannotated class is therefore @MainActor, so process runs on the main actor whatever NonisolatedNonsendingByDefault says. Fix: @concurrent on the method (or nonisolated type plus @concurrent).",
+      "files": [
+        "evals/files/xcode27-app/project.pbxproj",
+        "evals/files/xcode27-app/ImageProcessor.swift"
+      ],
+      "expectations": [
+        "Identifies SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor and concludes that the unannotated ImageProcessor class and its process method are @MainActor, so the work runs on the main thread",
+        "Notes that the target is in Swift 5 language mode (SWIFT_VERSION = 5.0) with Approachable Concurrency on, and does not claim it is Swift 6 mode",
+        "Recommends marking process `@concurrent` rather than Task.detached or DispatchQueue. If it instead makes ImageProcessor nonisolated, it also handles the non-Sendable `self` (for example makes the type Sendable), since calling a @concurrent method on a non-Sendable instance stored in a @MainActor view model is a 'sending' error"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "package-default-settings",
+      "prompt": "Our Networking package (Package.swift and one source file attached) is built with Xcode 27. When the app calls `try await parser.parse(data)` from a @MainActor view model, does the parse run on the main thread? A teammate says Swift 6.4 made nonisolated async functions run on the caller's actor by default.",
+      "expected_output": "Tools version 6.2 without an explicit language mode means Swift 6 mode, but NonisolatedNonsendingByDefault is not enabled (still opt-in in 6.4), so parse runs on the global concurrent executor, off the main thread. The teammate's claim is only true with the upcoming feature enabled.",
+      "files": [
+        "evals/files/swift6-package/Package.swift",
+        "evals/files/swift6-package/Parser.swift"
+      ],
+      "expectations": [
+        "Concludes that parse runs off the main actor (global concurrent executor) because the package does not enable NonisolatedNonsendingByDefault",
+        "Corrects the teammate: NonisolatedNonsendingByDefault is still opt-in in Swift 6.4, including Swift 6 mode",
+        "Explains that swift-tools-version is not itself the language mode, and that without an explicit swiftLanguageMode a 6.x tools version builds targets in Swift 6 mode"
+      ]
+    },
+    {
+      "id": 9,
+      "name": "tilde-sendable",
+      "prompt": "Our public SDK has `public struct QueryResult { let rows: [Row] }` where Row is a Sendable struct, so QueryResult is implicitly Sendable. We plan to add a non-Sendable cache reference later and don't want clients to depend on Sendable now. We build with Xcode 27 and deploy to iOS 16. How do we mark it as intentionally non-Sendable?",
+      "expected_output": "Corrects the premise: a public, non-frozen struct is not implicitly Sendable. `public struct QueryResult: ~Sendable` (SE-0518) documents that the missing conformance is deliberate; shipped in Swift 6.4 without a flag, any deployment target; must be on the declaration, not an extension.",
+      "files": [],
+      "expectations": [
+        "Corrects the premise that the public, non-frozen QueryResult is implicitly Sendable (only non-public or @frozen types get implicit Sendable), then explains that ~Sendable documents the intent",
+        "Recommends `~Sendable` on the type declaration (SE-0518)",
+        "States that ~Sendable is available in Swift 6.4 / Xcode 27 without an experimental flag, and that iOS 16 is fine because it is a compile-time feature",
+        "Does not present `@available(*, unavailable) extension QueryResult: Sendable {}` or a dummy non-Sendable stored property as the primary solution"
+      ]
+    },
+    {
+      "id": 10,
+      "name": "mainactor-subclass-sendable",
+      "prompt": "We have `class Renderer` (not Sendable, has mutable state) and `@MainActor final class PreviewRenderer: Renderer`. I tried adding `, Sendable` to PreviewRenderer and got a diagnostic in Xcode 27 with Swift 6 mode. Isn't a @MainActor class automatically Sendable? What should I do?",
+      "expected_output": "SE-0434: a global-actor-isolated subclass of a non-Sendable class is not implicitly Sendable. In Swift 6.4 the explicit conformance is a warning that will become an error. Options: drop the non-Sendable superclass, or @unchecked Sendable only with the inherited state protected.",
+      "files": [],
+      "expectations": [
+        "Explains that a @MainActor subclass of a non-Sendable class is not implicitly Sendable (SE-0434), because inherited state is not main-actor isolated",
+        "Describes the diagnostic as a warning in Swift 6.4 that will become an error in a future language mode, not as a hard error today",
+        "Offers a legitimate path: remove the non-Sendable superclass, or use @unchecked Sendable only if the subclass protects its own and the inherited mutable state"
+      ]
+    },
+    {
+      "id": 11,
+      "name": "app-intent-isolation",
+      "prompt": "My App Intent's perform() needs to update a @MainActor @Observable LibraryStore. Should I just mark the whole `struct OpenBookIntent: AppIntent` as @MainActor so everything runs on the main actor?",
+      "expected_output": "No. AppIntent requirements are nonisolated and the type is Sendable; a @MainActor intent type fails with a conformance isolation error. Annotate perform() with @MainActor or hop with await MainActor.run inside it. Consistent with Apple's app-intents-specialist guidance, which should take precedence when available.",
+      "files": [],
+      "expectations": [
+        "Advises against marking the intent type @MainActor, because AppIntent's requirements are nonisolated (conformance isolation error)",
+        "Recommends `@MainActor func perform()` or an explicit hop such as `await MainActor.run { ... }` inside perform()",
+        "Does not contradict Apple's App Intents guidance (perform() is nonisolated; a @Dependency must be Sendable); if the app-intents-specialist skill is available, uses or defers to it"
+      ]
+    },
+    {
+      "id": 12,
+      "name": "stale-search-results",
+      "prompt": "Our @MainActor SearchModel cancels the previous task on every keystroke: `searchTask?.cancel(); searchTask = Task { try? await Task.sleep(for: .milliseconds(300)); guard !Task.isCancelled else { return }; results = await api.search(query) }`. Users sometimes see results for an older query after typing a newer one. The search API ignores cancellation. Why, and how do we fix it?",
+      "expected_output": "Cancellation during api.search doesn't stop it, and the assignment after the await doesn't check cancellation, so a slow older search overwrites newer results. Store the result in a local, check Task.isCancelled (or compare against the current query/task) after the await, then assign.",
+      "files": [],
+      "expectations": [
+        "Explains that the older task is cancelled while suspended in api.search, which ignores cancellation, so it resumes and assigns stale results after the newer search",
+        "Fixes it by checking cancellation (or that the task/query is still current) after the await and before assigning results",
+        "Does not rely only on the check before the network call, and does not suggest Task.detached or removing the cancellation"
+      ]
+    },
+    {
+      "id": 13,
+      "name": "checked-lock-wrapper",
+      "prompt": "We support iOS 16 and build in Swift 6 mode with nonisolated default isolation. This compiles: `import os; final class Counter: Sendable { private let state = OSAllocatedUnfairLock(initialState: 0); func next() -> Int { state.withLock { $0 += 1; return $0 } } }`. A reviewer wants `@unchecked Sendable` because the lock itself uses unchecked conformance. Should I make that change? How would the answer differ for NSLock plus an ordinary stored var?",
+      "expected_output": "Retains checked Sendable for the final wrapper with immutable Sendable storage. Distinguishes NSLock plus separately mutable storage, whose synchronization the compiler cannot verify.",
+      "files": [],
+      "expectations": [
+        "Keeps checked Sendable on the supplied wrapper and explains why the lock's own unchecked conformance does not propagate to it",
+        "Distinguishes an ordinary stored var protected by NSLock from state held inside an immutable Sendable lock value",
+        "Respects the iOS 16 deployment target and does not replace the lock unconditionally with iOS 18 Mutex"
+      ]
+    },
+    {
+      "id": 14,
+      "name": "task-executor-preference",
+      "prompt": "In Swift 6.4, a task started with `Task(executorPreference: myExecutor)` calls an `@concurrent` function. Does @concurrent guarantee the default global concurrent executor, ignoring my executor? What changes if the task calls a method on an ordinary actor without a custom executor, or on MainActor?",
+      "expected_output": "Separates actor isolation from task executor preference. The nonisolated callee uses the preferred task executor; a default actor can use it while preserving serial isolation, while MainActor keeps its own executor requirement.",
+      "files": [],
+      "expectations": [
+        "Does not claim @concurrent always uses the default global concurrent executor; it respects the task executor preference",
+        "Explains that a default actor can execute using the preferred task executor while retaining its own actor isolation",
+        "Does not claim executor preference overrides MainActor or a custom actor executor, and does not equate thread or queue identity with actor isolation"
+      ]
+    },
+    {
+      "id": 15,
+      "name": "replacement-cleanup-ownership",
+      "prompt": "Our MainActor model supports repeated start/stop cycles. start() cancels the stored task, then stores a new `Task { defer { self.task = nil }; let value = await api.fetch(); guard !Task.isCancelled else { return }; self.value = value }`. The API ignores cancellation. In this order: start A, start B, let A finish, call stop() (`task?.cancel(); task = nil`), then let B finish. Can B still publish? Repair it while preserving later reuse of the same model.",
+      "expected_output": "Identifies A's unconditional cleanup erasing B's handle, guards cleanup by request identity or generation, protects publication after suspension and preserves stop/restart behavior.",
+      "files": [],
+      "expectations": [
+        "Explains why A can clear B's stored handle before stop(), leaving B uncancelled",
+        "Uses task/request ownership or generation for cleanup so only the current operation clears the handle",
+        "Keeps a post-await publication guard and invalidates or cancels current work on stop",
+        "Preserves subsequent successful start/stop cycles without adding a single-use precondition or trap",
+        "Describes a controlled A/B completion test instead of relying on compilation or timing sleeps alone"
+      ]
+    },
+    {
+      "id": 16,
+      "name": "legacy-callback-entry-isolation",
+      "prompt": "A Swift 5 dependency exposes `legacyFetch(_ completion: @escaping (Int) -> Void)` and invokes its callback once on a global queue. In our Swift 6 MainActor model, load() awaits a checked continuation, with this registration: `legacyFetch { value in Task { @MainActor in self.value = value; continuation.resume() } }`. We use `@preconcurrency import LegacyKit`, but get `_dispatch_assert_queue_fail`. Why can it crash despite the MainActor task, and how do we ensure load() returns only after the state update?",
+      "expected_output": "Repairs the outer callback isolation before the actor hop; uses an explicit Sendable callback with a safe value transfer and preserves state-update-before-return ordering.",
+      "files": [],
+      "expectations": [
+        "Identifies the outer callback inheriting MainActor isolation and trapping at entry before the inner task executes",
+        "Makes the outer callback nonisolated, for example explicitly @Sendable, with Sendable captures and payload",
+        "Preserves state mutation before load() returns, either by mutating before continuation resumption on MainActor or by returning the value through the continuation and assigning after await in the MainActor method",
+        "Does not treat @preconcurrency import, MainActor.assumeIsolated, or disabling dynamic actor checks as a dispatch operation or the repair",
+        "Qualifies the continuation design as requiring exactly-once completion; repeated callbacks need a different design"
       ]
     }
   ]
