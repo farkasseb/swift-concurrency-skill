@@ -100,7 +100,7 @@ Full matrix and per-feature notes: [references/versions-and-availability.md](ref
 - Prefer structured concurrency (`async let`, task groups) over `Task { }`, and `@concurrent` over `Task.detached`.
 - For new code, prefer `AsyncSequence`, `Observation`, and `swift-async-algorithms` over new Combine pipelines.
 - Treat `@unchecked Sendable`, `nonisolated(unsafe)`, `@preconcurrency import`, and `-disable-dynamic-actor-isolation` as tracked debt, not fixes.
-- For moving tests from XCTest to Swift Testing, use the `modernize-tests` skill if it is available. Swift Testing runs tests in parallel on arbitrary tasks, so add `@MainActor` only where a test needs it.
+- For moving tests from XCTest to Swift Testing, use the `swift-testing` skill if it is available, otherwise Apple's `modernize-tests` skill exported from Xcode. If neither is available, follow Apple's Swift Testing migration documentation. Swift Testing runs tests in parallel on arbitrary tasks, so add `@MainActor` only where a test needs it.
 
 ## References
 

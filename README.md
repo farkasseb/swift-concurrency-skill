@@ -38,7 +38,7 @@ evals/                                    benchmark prompts, fixtures, and grade
 tests/                                    compile and runtime probes (run.sh, probes.py)
 ```
 
-The skill defers to framework-specific skills where they exist, for example Apple's SwiftUI and App Intents skills that ship with Xcode 27, and `modernize-tests` for XCTest to Swift Testing migration.
+The skill defers to framework-specific skills where they exist, for example Apple's SwiftUI and App Intents skills that ship with Xcode 27, and `swift-testing`, falling back to Apple's `modernize-tests`, for XCTest to Swift Testing migration.
 
 ## Verification
 
